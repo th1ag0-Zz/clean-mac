@@ -14,11 +14,11 @@ struct ActionButton: View {
                 Image(systemName: icon)
             }
             .font(.system(size: 14, weight: .bold))
-            .foregroundStyle(AppStyle.background)
+            .foregroundStyle(.white)
             .padding(.horizontal, 24)
             .frame(height: 48)
             .background(
-                LinearGradient(colors: [AppStyle.mint, AppStyle.aqua],
+                LinearGradient(colors: [Color.white.opacity(0.22), Color.white.opacity(0.10)],
                                startPoint: .leading, endPoint: .trailing),
                 in: Capsule()
             )

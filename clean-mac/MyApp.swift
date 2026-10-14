@@ -7,7 +7,7 @@ import SwiftUI
         WindowGroup("Clean Mac", id: "main") {
             ContentView()
         }
-        .defaultSize(width: 1180, height: 820)
+        .defaultSize(width: 1180, height: 760)
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appSettings) {

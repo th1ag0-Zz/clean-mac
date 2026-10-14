@@ -24,6 +24,7 @@ for test in selected:
         raise SystemExit(f"Unknown test: {test}")
     executable = Path("/private/tmp") / ("clean-mac-" + test)
     print(f"Building {test}…", flush=True)
-    subprocess.run(["swiftc", "-D", "DEBUG", "-module-cache-path", str(cache), *sources, str(target), "-o", str(executable)], check=True, cwd=ROOT)
+    extra = ["-D", "SMARTCARE_TESTING", str(ROOT / "clean-mac/SmartCareView.swift")] if test == "SmartCareSmoke" else []
+    subprocess.run(["swiftc", "-D", "DEBUG", "-module-cache-path", str(cache), *sources, *extra, str(target), "-o", str(executable)], check=True, cwd=ROOT)
     subprocess.run([str(executable)], check=True, env=env, cwd=ROOT)
 print(f"PASS: {len(selected)} local checks", flush=True)

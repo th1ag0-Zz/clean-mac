@@ -1,3 +1,7 @@
+# Revisão 1.1
+
+Release e Debug compilados; 17 testes locais passaram. Comparação runtime, mudanças de interface e limitações estão em [FIDELIDADE.md](FIDELIDADE.md). As evidências abaixo registram a versão anterior.
+
 # Validação desta reconstrução
 
 Data: 14/10/2026. Host: Apple Silicon, macOS 27, Xcode 27.0 / Swift 6.4. Deployment target: macOS 15.

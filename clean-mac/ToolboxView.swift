@@ -3,6 +3,55 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ToolboxView: View {
+    @State private var selectedTool: Tool?
+    private enum Tool: String, CaseIterable {
+        case deletion, diskImage, mail, periodic, disk, snapshots, screen
+        var title: String {
+            switch self {
+            case .deletion: "Apagar arquivos"
+            case .diskImage: "Imagens de disco"
+            case .mail: "Otimizar o Mail"
+            case .periodic: "Scripts de manutenção"
+            case .disk: "Verificar disco"
+            case .snapshots: "Snapshots do Time Machine"
+            case .screen: "Limpar a tela"
+            }
+        }
+        var icon: String {
+            switch self {
+            case .deletion: "trash.slash"
+            case .diskImage: "externaldrive"
+            case .mail: "envelope"
+            case .periodic: "terminal"
+            case .disk: "internaldrive"
+            case .snapshots: "clock.arrow.circlepath"
+            case .screen: "display"
+            }
+        }
+        var detail: String {
+            switch self {
+            case .deletion: "Remova arquivos definitivamente."
+            case .diskImage: "Abra e ejete imagens DMG."
+            case .mail: "Compacte o índice de mensagens."
+            case .periodic: "Execute a manutenção do macOS."
+            case .disk: "Confira o sistema de arquivos."
+            case .snapshots: "Revise versões locais dos seus arquivos."
+            case .screen: "Escureça os monitores para limpar."
+            }
+        }
+        var color: Color {
+            switch self {
+            case .deletion: .pink
+            case .diskImage: .blue
+            case .mail: .cyan
+            case .periodic: .purple
+            case .disk: .orange
+            case .snapshots: .green
+            case .screen: .indigo
+            }
+        }
+    }
+
     @State private var selectedFiles: [PermanentDeletion.Item] = []
     @State private var showingDelete = false
     @State private var showingMailOptimization = false
@@ -16,70 +65,91 @@ struct ToolboxView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
-            Text("Ferramentas").font(.system(size: 40, weight: .semibold, design: .rounded))
-            Text("Utilitários locais para cuidar de arquivos, discos e tela.").foregroundStyle(AppStyle.muted)
+            if selectedTool == nil {
+                toolInventory
+            } else {
+                Button {
+                    selectedTool = nil
+                    result = nil
+                } label: { Label("Todas as ferramentas", systemImage: "chevron.left") }
+                    .foregroundStyle(AppStyle.muted).disabled(busy)
+            }
             if let result {
                 Text(result).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
                     .padding(16).frame(maxWidth: .infinity, alignment: .leading)
                     .background(AppStyle.card, in: RoundedRectangle(cornerRadius: 12))
             }
             if busy { ProgressView("Aguardando o macOS…").tint(AppStyle.mint) }
-            toolCard("Apagar arquivos definitivamente", icon: "trash.slash") {
-                Text("Remove os arquivos escolhidos sem passar pela Lixeira. Em SSDs e APFS, snapshots, cópias e o gerenciamento do disco impedem garantir sobrescrita segura. Backups e cópias na nuvem não são apagados.").foregroundStyle(AppStyle.muted)
-                HStack(spacing: 20) {
-                    Button("Escolher arquivos…") { selectFiles() }
-                    Button("Apagar \(selectedFiles.count) arquivo(s)", role: .destructive) { showingDelete = true }
-                        .disabled(selectedFiles.isEmpty || busy || LocalCommand.isFixture)
-                }
-                ForEach(selectedFiles) { file in
-                    HStack {
-                        Text(file.url.path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
-                        Spacer()
-                        Text(ByteText.format(file.bytes)).foregroundStyle(AppStyle.muted)
-                        Button { selectedFiles.removeAll { $0.id == file.id } } label: { Image(systemName: "xmark.circle") }
-                    }.font(.system(size: 12))
-                }
-            }
-            toolCard("Imagens de disco", icon: "externaldrive") {
-                Text("Monte uma imagem DMG somente para leitura e confira o conteúdo no Finder. Ao terminar, desmonte o volume aqui. Nenhum aplicativo é instalado automaticamente.").foregroundStyle(AppStyle.muted)
-                Button("Abrir imagem DMG…") { selectDiskImage() }.disabled(busy || LocalCommand.isFixture)
-                ForEach(mounts) { mount in
-                    HStack {
-                        Text(mount.path)
-                        Spacer()
-                        Button("Abrir no Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: mount.path)) }
-                        Button("Ejetar") { detach(mount) }.disabled(busy)
-                    }.font(.system(size: 12))
-                }
-            }
-            toolCard("Otimizar índice do Mail", icon: "envelope") {
-                Text("Com o Mail fechado, faz uma cópia consistente do banco de índice e compacta suas páginas SQLite. Não remove mensagens ou anexos. O acesso pode exigir Acesso Total ao Disco em Ajustes do Sistema.").foregroundStyle(AppStyle.muted)
-                Button("Revisar otimização…") { showingMailOptimization = true }.disabled(busy || LocalCommand.isFixture)
-            }
-            if FileManager.default.isExecutableFile(atPath: "/usr/sbin/periodic") {
-                toolCard("Scripts de manutenção", icon: "terminal") {
-                    Text("Executa os scripts daily, weekly e monthly fornecidos pelo macOS. A autorização de administrador será solicitada pelo sistema.").foregroundStyle(AppStyle.muted)
-                    Button("Executar scripts…") { showingPeriodic = true }.disabled(busy || LocalCommand.isFixture)
-                }
-            }
-            toolCard("Verificar disco", icon: "internaldrive") {
-                Text("Executa a verificação do sistema de arquivos do volume de dados, sem solicitar reparo. Pode demorar e o macOS pode exigir mais permissões.").foregroundStyle(AppStyle.muted)
-                Button("Verificar volume de dados") { verifyDisk() }.disabled(busy || LocalCommand.isFixture)
-            }
-            toolCard("Snapshots locais do Time Machine", icon: "clock.arrow.circlepath") {
-                Text("Snapshots permitem recuperar versões anteriores. O macOS costuma liberar esse espaço automaticamente. Exclua apenas um snapshot que você revisou; a exclusão é permanente e o espaço liberado pode variar.").foregroundStyle(AppStyle.muted)
-                Button("Listar snapshots") { listSnapshots() }.disabled(busy || LocalCommand.isFixture)
-                ForEach(snapshots, id: \.self) { name in
-                    HStack {
-                        Text(name).font(.system(size: 12, design: .monospaced))
-                        Spacer()
-                        Button("Excluir…", role: .destructive) { selectedSnapshot = name; showingSnapshotDelete = true }.disabled(busy)
+            if selectedTool == .deletion {
+                toolCard("Apagar arquivos definitivamente", icon: "trash.slash") {
+                    Text("Remove os arquivos escolhidos sem passar pela Lixeira. Em SSDs e APFS, snapshots, cópias e o gerenciamento do disco impedem garantir sobrescrita segura. Backups e cópias na nuvem não são apagados.").foregroundStyle(AppStyle.muted)
+                    HStack(spacing: 20) {
+                        Button("Escolher arquivos…") { selectFiles() }
+                        Button("Apagar \(selectedFiles.count) arquivo(s)", role: .destructive) { showingDelete = true }
+                            .disabled(selectedFiles.isEmpty || busy || LocalCommand.isFixture)
+                    }
+                    ForEach(selectedFiles) { file in
+                        HStack {
+                            Text(file.url.path).lineLimit(1).truncationMode(.middle).textSelection(.enabled)
+                            Spacer()
+                            Text(ByteText.format(file.bytes)).foregroundStyle(AppStyle.muted)
+                            Button { selectedFiles.removeAll { $0.id == file.id } } label: { Image(systemName: "xmark.circle") }
+                        }.font(.system(size: 12))
                     }
                 }
             }
-            toolCard("Limpar a tela", icon: "display") {
-                Text("Mostra preto em todos os monitores para facilitar a limpeza. Pressione Esc ou clique para sair. O teclado e o trackpad continuam ativos.").foregroundStyle(AppStyle.muted)
-                Button("Escurecer monitores") { ScreenCleaningController.shared.show() }.disabled(LocalCommand.isFixture)
+            if selectedTool == .diskImage {
+                toolCard("Imagens de disco", icon: "externaldrive") {
+                    Text("Monte uma imagem DMG somente para leitura e confira o conteúdo no Finder. Ao terminar, desmonte o volume aqui. Nenhum aplicativo é instalado automaticamente.").foregroundStyle(AppStyle.muted)
+                    Button("Abrir imagem DMG…") { selectDiskImage() }.disabled(busy || LocalCommand.isFixture)
+                    ForEach(mounts) { mount in
+                        HStack {
+                            Text(mount.path)
+                            Spacer()
+                            Button("Abrir no Finder") { NSWorkspace.shared.open(URL(fileURLWithPath: mount.path)) }
+                            Button("Ejetar") { detach(mount) }.disabled(busy)
+                        }.font(.system(size: 12))
+                    }
+                }
+            }
+            if selectedTool == .mail {
+                toolCard("Otimizar índice do Mail", icon: "envelope") {
+                    Text("Com o Mail fechado, faz uma cópia consistente do banco de índice e compacta suas páginas SQLite. Não remove mensagens ou anexos. O acesso pode exigir Acesso Total ao Disco em Ajustes do Sistema.").foregroundStyle(AppStyle.muted)
+                    Button("Revisar otimização…") { showingMailOptimization = true }.disabled(busy || LocalCommand.isFixture)
+                }
+            }
+            if selectedTool == .periodic {
+                if FileManager.default.isExecutableFile(atPath: "/usr/sbin/periodic") {
+                    toolCard("Scripts de manutenção", icon: "terminal") {
+                        Text("Executa os scripts daily, weekly e monthly fornecidos pelo macOS. A autorização de administrador será solicitada pelo sistema.").foregroundStyle(AppStyle.muted)
+                        Button("Executar scripts…") { showingPeriodic = true }.disabled(busy || LocalCommand.isFixture)
+                    }
+                }
+            }
+            if selectedTool == .disk {
+                toolCard("Verificar disco", icon: "internaldrive") {
+                    Text("Executa a verificação do sistema de arquivos do volume de dados, sem solicitar reparo. Pode demorar e o macOS pode exigir mais permissões.").foregroundStyle(AppStyle.muted)
+                    Button("Verificar volume de dados") { verifyDisk() }.disabled(busy || LocalCommand.isFixture)
+                }
+            }
+            if selectedTool == .snapshots {
+                toolCard("Snapshots locais do Time Machine", icon: "clock.arrow.circlepath") {
+                    Text("Snapshots permitem recuperar versões anteriores. O macOS costuma liberar esse espaço automaticamente. Exclua apenas um snapshot que você revisou; a exclusão é permanente e o espaço liberado pode variar.").foregroundStyle(AppStyle.muted)
+                    Button("Listar snapshots") { listSnapshots() }.disabled(busy || LocalCommand.isFixture)
+                    ForEach(snapshots, id: \.self) { name in
+                        HStack {
+                            Text(name).font(.system(size: 12, design: .monospaced))
+                            Spacer()
+                            Button("Excluir…", role: .destructive) { selectedSnapshot = name; showingSnapshotDelete = true }.disabled(busy)
+                        }
+                    }
+                }
+            }
+            if selectedTool == .screen {
+                toolCard("Limpar a tela", icon: "display") {
+                    Text("Mostra preto em todos os monitores para facilitar a limpeza. Pressione Esc ou clique para sair. O teclado e o trackpad continuam ativos.").foregroundStyle(AppStyle.muted)
+                    Button("Escurecer monitores") { ScreenCleaningController.shared.show() }.disabled(LocalCommand.isFixture)
+                }
             }
         }
         .font(.system(size: 13)).buttonStyle(.plain)
@@ -103,6 +173,30 @@ struct ToolboxView: View {
             Button("Excluir snapshot", role: .destructive) { deleteSnapshot() }
         } message: {
             Text("\(selectedSnapshot ?? "")\nEssa versão anterior dos seus arquivos deixará de estar disponível localmente.")
+        }
+    }
+
+    private var toolInventory: some View {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 14), GridItem(.flexible(), spacing: 14)], spacing: 14) {
+            ForEach(Tool.allCases.filter { $0 != .periodic || FileManager.default.isExecutableFile(atPath: "/usr/sbin/periodic") }, id: \.self) { tool in
+                Button {
+                    selectedTool = tool
+                    result = nil
+                } label: {
+                    HStack(alignment: .center, spacing: 14) {
+                        Image(systemName: tool.icon).font(.system(size: 23, weight: .medium))
+                            .foregroundStyle(tool.color).frame(width: 48, height: 48)
+                            .background(tool.color.opacity(0.13), in: RoundedRectangle(cornerRadius: 12))
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(tool.title).font(.system(size: 14, weight: .semibold))
+                            Text(tool.detail).font(.system(size: 11)).foregroundStyle(AppStyle.muted)
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold)).foregroundStyle(AppStyle.muted)
+                    }.padding(18).frame(maxWidth: .infinity, minHeight: 92, alignment: .leading)
+                        .background(AppStyle.card, in: RoundedRectangle(cornerRadius: 15))
+                        .contentShape(RoundedRectangle(cornerRadius: 15))
+                }.buttonStyle(.plain).disabled(busy)
+            }
         }
     }
 

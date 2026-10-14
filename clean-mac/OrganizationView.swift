@@ -12,6 +12,8 @@ final class OrganizationViewModel: ObservableObject {
     @Published private(set) var isRemoving = false
     @Published var selectedIDs: Set<String> = []
     private let engine = OrganizationEngine()
+    private var scanTask: Task<Void, Never>?
+    private var scanID = UUID()
 
     var selectedFiles: [OrganizedFile] {
         guard let snapshot else { return [] }
@@ -28,26 +30,50 @@ final class OrganizationViewModel: ObservableObject {
     }
 
     func accept(_ analysis: OrganizationSnapshot) {
+        guard !isRemoving else { return }
+        scanID = UUID(); scanTask?.cancel(); scanTask = nil
         snapshot = analysis; selectedIDs = []; error = nil; state = .results
     }
 
     func scan() {
-        guard state != .scanning else { return }
-        state = .scanning; error = nil; snapshot = nil; selectedIDs = []
-        Task {
-            do { snapshot = try await engine.scan(); state = .results }
-            catch { self.error = error.localizedDescription; state = .failed }
+        guard !isRemoving else { return }
+        scanID = UUID()
+        let currentScan = scanID
+        scanTask?.cancel()
+        state = .scanning; error = nil; selectedIDs = []
+        scanTask = Task {
+            do {
+                let found = try await engine.scan()
+                try Task.checkCancellation()
+                guard scanID == currentScan else { return }
+                snapshot = found; state = .results
+            } catch is CancellationError {
+                guard scanID == currentScan else { return }
+                state = snapshot == nil ? .idle : .results
+            } catch {
+                guard scanID == currentScan else { return }
+                self.error = error.localizedDescription; state = .failed
+            }
         }
     }
 
+    func cancel() {
+        guard state == .scanning else { return }
+        scanID = UUID()
+        scanTask?.cancel(); scanTask = nil
+        state = snapshot == nil ? .idle : .results
+    }
+
     func removeSelected() {
-        guard let snapshot, !isRemoving, !selectedFiles.isEmpty else { return }
+        guard state == .results, let snapshot, !isRemoving, !selectedFiles.isEmpty else { return }
         let files = selectedFiles
         isRemoving = true; removalMessage = nil
         Task {
             do {
                 let report = try await engine.moveToTrash(files, duplicateGroups: snapshot.duplicateGroups)
                 removalMessage = report.message
+                self.snapshot = nil
+                selectedIDs = []
                 isRemoving = false
                 scan()
             } catch { removalMessage = error.localizedDescription; isRemoving = false }
@@ -57,25 +83,41 @@ final class OrganizationViewModel: ObservableObject {
 
 struct OrganizationView: View {
     @ObservedObject var model: OrganizationViewModel
+    var openLargeFiles: (() -> Void)? = nil
+    var openPhotos: (() -> Void)? = nil
     @State private var category: Category = .downloads
     @State private var search = ""
     @State private var reviewing = false
-    private enum Category: String, CaseIterable { case downloads = "Downloads", old = "Antigos", duplicates = "Duplicados", similar = "Imagens semelhantes" }
+    private enum Category: String, CaseIterable { case downloads = "Downloads", old = "Antigos", duplicates = "Duplicatas", similar = "Imagens similares" }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Acúmulos").font(.system(size: 40, weight: .semibold, design: .rounded))
-            Text("Organize downloads, arquivos antigos, cópias idênticas e imagens semelhantes.")
-                .foregroundStyle(AppStyle.muted)
-            if let message = model.removalMessage { Text(message).foregroundStyle(AppStyle.mint).textSelection(.enabled) }
-            switch model.state {
-            case .idle: ActionButton(title: "Analisar organização", icon: "square.grid.3x3") { model.scan() }
-            case .scanning: ProgressView("Comparando arquivos locais…").tint(AppStyle.mint)
-            case .failed:
-                Text(model.error ?? "A análise falhou.").foregroundStyle(.orange)
-                Button("Tentar novamente") { model.scan() }
-            case .results:
-                if let snapshot = model.snapshot { results(snapshot) }
+        Group {
+            if model.state == .idle {
+                VStack(spacing: 0) {
+                    ModuleLandingView(title: "Acúmulos", subtitle: "Abra espaço para o que importa.\nEncontre arquivos grandes, duplicatas e downloads esquecidos.", symbol: "folder.fill", accent: .teal,
+                                      features: [("doc", "Arquivos grandes"), ("doc.on.doc", "Duplicatas"), ("photo.on.rectangle", "Imagens similares"), ("tray.full", "Downloads")]) { model.scan() }
+                    relatedTools
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack {
+                        Text("Acúmulos").font(.system(size: 30, weight: .bold))
+                        Spacer()
+                        if model.state == .results { Button("Analisar novamente", systemImage: "arrow.clockwise") { model.scan() }.buttonStyle(.plain).foregroundStyle(AppStyle.muted) }
+                    }
+                    if let message = model.removalMessage { Text(message).foregroundStyle(AppStyle.mint).textSelection(.enabled) }
+                    switch model.state {
+                    case .idle: EmptyView()
+                    case .scanning:
+                        ScanOrbitView(title: "Encontrando acúmulos…", detail: "Comparando seus arquivos e imagens locais.", progress: nil, cancel: model.cancel)
+                    case .failed:
+                        Text(model.error ?? "A análise falhou.").foregroundStyle(.orange)
+                        Button("Tentar novamente") { model.scan() }
+                    case .results:
+                        if let snapshot = model.snapshot { results(snapshot) }
+                        relatedTools
+                    }
+                }
             }
         }
         .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
@@ -85,62 +127,100 @@ struct OrganizationView: View {
         }
     }
 
+    private var relatedTools: some View {
+        HStack(spacing: 22) {
+            if let openLargeFiles {
+                Button(action: openLargeFiles) { Label("Arquivos grandes", systemImage: "doc") }
+            }
+            if let openPhotos {
+                Button(action: openPhotos) { Label("Biblioteca de Fotos", systemImage: "photo.on.rectangle.angled") }
+            }
+        }.buttonStyle(.plain).font(.system(size: 12, weight: .medium)).foregroundStyle(AppStyle.muted)
+            .frame(maxWidth: .infinity).padding(.vertical, 10)
+    }
+
     private func results(_ snapshot: OrganizationSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            HStack {
-                Text("\(snapshot.scannedFiles) arquivos examinados").font(.system(size: 17, weight: .semibold))
-                Spacer()
-                Button("Analisar novamente") { model.scan() }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
+            HStack(spacing: 8) {
+                ForEach(Category.allCases, id: \.self) { item in
+                    Button { category = item; search = "" } label: {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Image(systemName: symbol(item)).font(.system(size: 22)).foregroundStyle(category == item ? Color.teal : AppStyle.muted)
+                            Text(item.rawValue).font(.system(size: 12, weight: .semibold))
+                            Text("\(count(item, snapshot: snapshot)) itens").font(.system(size: 11)).foregroundStyle(AppStyle.muted)
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(15)
+                            .background(category == item ? Color.teal.opacity(0.12) : AppStyle.card, in: RoundedRectangle(cornerRadius: 12))
+                            .overlay(RoundedRectangle(cornerRadius: 12).strokeBorder(category == item ? Color.teal.opacity(0.6) : Color.clear))
+                    }.buttonStyle(.plain)
+                }
             }
-            Text("Pastas pessoais locais. Links, pacotes, nuvem e outros volumes são ignorados. Os tamanhos são lógicos; clones APFS podem compartilhar espaço.")
-                .foregroundStyle(AppStyle.muted)
+            HStack {
+                Text("\(snapshot.scannedFiles) arquivos examinados").foregroundStyle(AppStyle.muted)
+                Spacer()
+                TextField("Buscar por nome ou caminho", text: $search).textFieldStyle(.roundedBorder).frame(maxWidth: 250)
+            }
             if snapshot.inaccessibleLocations > 0 { Text("\(snapshot.inaccessibleLocations) locais não puderam ser lidos.").foregroundStyle(.orange) }
-            HStack(spacing: 10) {
-                ForEach(snapshot.folders) { folder in
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(folder.name).fontWeight(.semibold)
-                        Text(ByteText.format(folder.logicalBytes)).foregroundStyle(AppStyle.mint)
-                    }.frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                        .background(AppStyle.card, in: RoundedRectangle(cornerRadius: 12))
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    switch category {
+                    case .downloads:
+                        fileList(snapshot.downloads, empty: "Nenhum download encontrado.")
+                    case .old:
+                        Text("Sem alterações há pelo menos 365 dias. Isso não mede o último acesso.").foregroundStyle(AppStyle.muted)
+                        fileList(snapshot.oldFiles, empty: "Nenhum arquivo antigo encontrado.")
+                    case .duplicates:
+                        Text("Arquivos com conteúdo idêntico. Mantenha ao menos uma cópia de cada grupo.").foregroundStyle(AppStyle.muted)
+                        let groups = snapshot.duplicateGroups.filter { $0.files.contains(where: matches) }
+                        if groups.isEmpty { Text("Nenhum duplicado encontrado.").foregroundStyle(AppStyle.muted) }
+                        ForEach(groups) { group in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("\(group.files.count) cópias · até \(ByteText.format(group.possibleSavings)) repetidos").fontWeight(.semibold)
+                                ForEach(group.files) { file in fileRow(file) }
+                            }.padding(12).background(AppStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                    case .similar:
+                        Text("Semelhança visual aproximada. Abra as imagens e compare antes de selecionar.").foregroundStyle(AppStyle.muted)
+                        let pairs = snapshot.similarImages.filter { matches($0.first) || matches($0.second) }
+                        if pairs.isEmpty { Text("Nenhuma imagem semelhante encontrada.").foregroundStyle(AppStyle.muted) }
+                        ForEach(pairs) { pair in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text("Imagens visualmente semelhantes").fontWeight(.semibold)
+                                fileRow(pair.first)
+                                fileRow(pair.second)
+                            }.padding(12).background(AppStyle.card, in: RoundedRectangle(cornerRadius: 14))
+                        }
+                        if snapshot.skippedImages > 0 { Text("\(snapshot.skippedImages) imagens ficaram fora da comparação. Limite: 500 imagens locais de até 40 MB.").foregroundStyle(AppStyle.muted) }
+                    }
                 }
-            }
-            Picker("Categoria", selection: $category) { ForEach(Category.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
-            TextField("Buscar por nome ou caminho", text: $search).textFieldStyle(.roundedBorder)
+            }.frame(minHeight: 270, maxHeight: 400)
+            Divider()
             HStack {
-                Text("\(model.selectedFiles.count) selecionados · \(ByteText.format(model.selectedFiles.reduce(0) { $0 &+ $1.logicalBytes }))")
-                Button("Limpar seleção") { model.selectedIDs = [] }.disabled(model.selectedIDs.isEmpty)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(ByteText.format(model.selectedFiles.reduce(0) { $0 &+ $1.logicalBytes })).font(.system(size: 22, weight: .semibold))
+                    Text("\(model.selectedFiles.count) arquivos selecionados").font(.system(size: 11)).foregroundStyle(AppStyle.muted)
+                }
+                if !model.selectedIDs.isEmpty { Button("Desmarcar") { model.selectedIDs = [] }.buttonStyle(.plain).foregroundStyle(AppStyle.muted) }
                 Spacer()
-                Button("Revisar e mover…") { reviewing = true }.disabled(model.selectedFiles.isEmpty)
+                Button("Remover…") { reviewing = true }
+                    .buttonStyle(.borderedProminent).tint(.pink).controlSize(.large).disabled(model.selectedFiles.isEmpty)
             }
-            switch category {
-            case .downloads:
-                fileList(snapshot.downloads, empty: "Nenhum download encontrado.")
-            case .old:
-                Text("Sem alterações há pelo menos 365 dias. Isso não mede o último acesso.").foregroundStyle(AppStyle.muted)
-                fileList(snapshot.oldFiles, empty: "Nenhum arquivo antigo encontrado.")
-            case .duplicates:
-                Text("Mesmo tamanho e SHA-256. Uma cópia de cada grupo deve ser mantida. Nenhum arquivo é selecionado automaticamente.").foregroundStyle(AppStyle.muted)
-                let groups = snapshot.duplicateGroups.filter { $0.files.contains(where: matches) }
-                if groups.isEmpty { Text("Nenhum duplicado encontrado.").foregroundStyle(AppStyle.muted) }
-                ForEach(groups) { group in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("\(group.files.count) cópias · até \(ByteText.format(group.possibleSavings)) repetidos").fontWeight(.semibold)
-                        ForEach(group.files) { file in fileRow(file) }
-                    }.padding(12).background(AppStyle.card, in: RoundedRectangle(cornerRadius: 14))
-                }
-            case .similar:
-                Text("Semelhança visual aproximada. Abra as imagens e compare antes de selecionar.").foregroundStyle(AppStyle.muted)
-                let pairs = snapshot.similarImages.filter { matches($0.first) || matches($0.second) }
-                if pairs.isEmpty { Text("Nenhuma imagem semelhante encontrada.").foregroundStyle(AppStyle.muted) }
-                ForEach(pairs) { pair in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Possível semelhança · distância visual \(pair.distance)/64").fontWeight(.semibold)
-                        fileRow(pair.first)
-                        fileRow(pair.second)
-                    }.padding(12).background(AppStyle.card, in: RoundedRectangle(cornerRadius: 14))
-                }
-                if snapshot.skippedImages > 0 { Text("\(snapshot.skippedImages) imagens ficaram fora da comparação. Limite: 500 imagens locais de até 40 MB.").foregroundStyle(AppStyle.muted) }
-            }
+        }
+        .padding(20)
+        .background(.white, in: RoundedRectangle(cornerRadius: 16))
+        .foregroundStyle(.primary)
+        .tint(.purple)
+        .environment(\.colorScheme, .light)
+    }
+
+    private func symbol(_ category: Category) -> String {
+        switch category { case .downloads: "tray.full"; case .old: "clock.arrow.circlepath"; case .duplicates: "doc.on.doc"; case .similar: "photo.on.rectangle" }
+    }
+    private func count(_ category: Category, snapshot: OrganizationSnapshot) -> Int {
+        switch category {
+        case .downloads: snapshot.downloads.count
+        case .old: snapshot.oldFiles.count
+        case .duplicates: snapshot.duplicateGroups.reduce(0) { $0 + $1.files.count }
+        case .similar: Set(snapshot.similarImages.flatMap { [$0.first.id, $0.second.id] }).count
         }
     }
 
@@ -160,12 +240,13 @@ struct OrganizationView: View {
             Image(nsImage: NSWorkspace.shared.icon(forFile: file.url.path)).resizable().frame(width: 30, height: 30)
             VStack(alignment: .leading, spacing: 4) {
                 Text(file.url.lastPathComponent).fontWeight(.semibold)
-                Text(file.relativePath).font(.system(size: 11, design: .monospaced)).foregroundStyle(AppStyle.muted).textSelection(.enabled)
-                Text("\(ByteText.format(file.logicalBytes)) · \(file.modifiedAt.formatted(date: .abbreviated, time: .omitted))").font(.system(size: 11)).foregroundStyle(AppStyle.muted)
+                Text(file.relativePath).font(.system(size: 11)).foregroundStyle(AppStyle.muted).lineLimit(1).truncationMode(.middle).help(file.relativePath)
+                Text(file.modifiedAt.formatted(date: .abbreviated, time: .omitted)).font(.system(size: 11)).foregroundStyle(AppStyle.muted)
             }
             Spacer()
-            Button("Abrir") { NSWorkspace.shared.open(file.url) }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
-            Button("Finder") { NSWorkspace.shared.activateFileViewerSelecting([file.url]) }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
+            Text(ByteText.format(file.logicalBytes)).font(.system(size: 12, weight: .medium)).foregroundStyle(AppStyle.muted)
+            Button("Abrir") { NSWorkspace.shared.open(file.url) }.buttonStyle(.plain).foregroundStyle(.purple)
+            Button("Finder") { NSWorkspace.shared.activateFileViewerSelecting([file.url]) }.buttonStyle(.plain).foregroundStyle(.purple)
         }.padding(12).background(AppStyle.card, in: RoundedRectangle(cornerRadius: 12))
     }
 }

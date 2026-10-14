@@ -17,19 +17,62 @@ struct SmartCareSnapshot: Sendable {
     let organizationResult: OrganizationSnapshot
     let largeFilesResult: LargeFilesSnapshot
     let applicationsResult: ApplicationsSnapshot
+    let protectionResult: ProtectionSnapshot?
+    let protectionError: String?
+}
+
+enum SmartCareStage: Int, CaseIterable, Sendable {
+    case cleanup, advanced, protection, organization, largeFiles, applications, complete
+    var title: String {
+        switch self {
+        case .cleanup: "Procurando arquivos desnecessários"
+        case .advanced: "Analisando dados do sistema"
+        case .protection: "Verificando a proteção local"
+        case .organization: "Encontrando arquivos repetidos"
+        case .largeFiles: "Localizando arquivos grandes"
+        case .applications: "Revisando aplicativos"
+        case .complete: "Preparando seus resultados"
+        }
+    }
+    var detail: String {
+        switch self {
+        case .cleanup: "Caches, registros e instaladores antigos"
+        case .advanced: "Dados de desenvolvimento, backups e arquivos temporários"
+        case .protection: "Downloads, itens de inicialização e ajustes de segurança"
+        case .organization: "Comparando o conteúdo dos arquivos locais"
+        case .largeFiles: "Arquivos com 100 MB ou mais nas pastas analisadas"
+        case .applications: "Aplicativos instalados, resíduos e instaladores"
+        case .complete: "Organizando o que você pode revisar"
+        }
+    }
+    var progress: Double { Double(rawValue) / Double(Self.allCases.count - 1) }
 }
 
 actor SmartCareEngine {
-    func scan() async throws -> SmartCareSnapshot {
+    func scan(progress: @Sendable (SmartCareStage) async -> Void = { _ in }) async throws -> SmartCareSnapshot {
+        await progress(.cleanup)
         let cleanup = try await AnalysisEngine().analyze()
         try Task.checkCancellation()
+        await progress(.advanced)
         let advanced = try await AdvancedCleanupEngine().analyze()
         try Task.checkCancellation()
+        await progress(.protection)
+        var protection: ProtectionSnapshot?
+        var protectionError: String?
+        do { protection = try await ProtectionEngine().analyze() }
+        catch is CancellationError { throw CancellationError() }
+        catch { protectionError = error.localizedDescription }
+        try Task.checkCancellation()
+        await progress(.organization)
         let organization = try await OrganizationEngine().scan()
         try Task.checkCancellation()
+        await progress(.largeFiles)
         let largeFiles = try await LargeFilesEngine().scan()
         try Task.checkCancellation()
+        await progress(.applications)
         let apps = try await ApplicationsEngine().scan()
+        try Task.checkCancellation()
+        await progress(.complete)
         let cleanupBytes = cleanup.candidates.reduce(UInt64(0)) { Self.add($0, $1.logicalBytes) }
         let advancedBytes = advanced.candidates.reduce(UInt64(0)) { Self.add($0, $1.logicalBytes) }
         let duplicateSavings = organization.duplicateGroups.reduce(UInt64(0)) { Self.add($0, $1.possibleSavings) }
@@ -38,10 +81,12 @@ actor SmartCareEngine {
                                  duplicateGroups: organization.duplicateGroups.count,
                                  duplicateSavings: duplicateSavings, largeFiles: largeFiles.files.count,
                                  appResidues: apps.residues.count, oldInstallers: apps.installers.count,
-                                 issues: advanced.issues.count + organization.inaccessibleLocations +
-                                     largeFiles.inaccessibleLocations,
+                                 issues: cleanup.issues.count + advanced.issues.count + organization.inaccessibleLocations +
+                                     largeFiles.inaccessibleLocations + apps.installerAnalysis.issues.count +
+                                     (protection?.issues.count ?? 0) + (protectionError == nil ? 0 : 1),
                                  cleanupResult: cleanup, advancedResult: advanced,
-                                 organizationResult: organization, largeFilesResult: largeFiles, applicationsResult: apps)
+                                 organizationResult: organization, largeFilesResult: largeFiles, applicationsResult: apps,
+                                 protectionResult: protection, protectionError: protectionError)
     }
 
     private static func add(_ lhs: UInt64, _ rhs: UInt64) -> UInt64 {
@@ -56,6 +101,7 @@ final class SmartCareViewModel: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var snapshot: SmartCareSnapshot?
     @Published private(set) var error: String?
+    @Published private(set) var stage: SmartCareStage = .cleanup
     private let engine = SmartCareEngine()
     private var task: Task<Void, Never>?
     private var scanID = UUID()
@@ -65,11 +111,14 @@ final class SmartCareViewModel: ObservableObject {
         scanID = UUID()
         let currentID = scanID
         state = .scanning
+        stage = .cleanup
         error = nil
         snapshot = nil
         task = Task {
             do {
-                let result = try await engine.scan()
+                let result = try await engine.scan { [weak self] stage in
+                    await self?.receive(stage, scanID: currentID)
+                }
                 try Task.checkCancellation()
                 guard scanID == currentID else { return }
                 snapshot = result
@@ -85,6 +134,11 @@ final class SmartCareViewModel: ObservableObject {
         }
     }
 
+    private func receive(_ stage: SmartCareStage, scanID: UUID) {
+        guard self.scanID == scanID, state == .scanning else { return }
+        self.stage = stage
+    }
+
     func cancel() {
         task?.cancel()
         scanID = UUID()
@@ -92,100 +146,135 @@ final class SmartCareViewModel: ObservableObject {
     }
 }
 
+#if !SMARTCARE_TESTING
 struct SmartCareView: View {
     @ObservedObject var model: SmartCareViewModel
+    @StateObject private var health = SystemHealth()
     let openCleanup: () -> Void
     let openAdvanced: () -> Void
     let openOrganization: () -> Void
     let openLargeFiles: () -> Void
     let openApplications: () -> Void
     let openPerformance: () -> Void
+    var openProtection: () -> Void = {}
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Text("Cuidados Inteligentes")
-                .font(.system(size: 40, weight: .semibold, design: .rounded))
-            Text("Uma análise local de limpeza, arquivos repetidos, arquivos grandes e dados de aplicativos. Revise cada área antes de agir.")
-                .font(.system(size: 14)).foregroundStyle(AppStyle.muted)
+        Group {
             switch model.state {
             case .idle:
-                welcome
+                ModuleLandingView(title: "Cuidados\nInteligentes",
+                                  subtitle: "Um Mac mais limpo, organizado e pronto para o seu dia.",
+                                  symbol: "desktopcomputer", accent: .pink,
+                                  features: [("sparkles", "Encontre espaço para liberar"),
+                                             ("shield.lefthalf.filled", "Revise a proteção do seu Mac"),
+                                             ("square.grid.2x2", "Organize arquivos e aplicativos")]) { model.scan() }
             case .scanning:
-                ProgressView("Analisando as áreas locais…").tint(AppStyle.mint)
-                Button("Cancelar") { model.cancel() }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
+                VStack(spacing: 18) {
+                    ScanOrbitView(title: model.stage.title, detail: model.stage.detail,
+                                  progress: model.stage.progress) { model.cancel() }
+                    HStack(spacing: 8) {
+                        ForEach(SmartCareStage.allCases.filter { $0 != .complete }, id: \.rawValue) { stage in
+                            Capsule().fill(stage.rawValue <= model.stage.rawValue ? Color.pink : Color.white.opacity(0.15))
+                                .frame(width: 28, height: 4)
+                        }
+                    }.accessibilityLabel("Etapa \(min(model.stage.rawValue + 1, 6)) de 6")
+                    Text("Você poderá revisar os resultados antes de fazer alterações.")
+                        .font(.system(size: 12)).foregroundStyle(AppStyle.muted)
+                }
             case .failed:
-                Text(model.error ?? "Não foi possível concluir a análise.").foregroundStyle(.orange)
-                ActionButton(title: "Tentar novamente", icon: "arrow.clockwise") { model.scan() }
+                VStack(spacing: 20) {
+                    Image(systemName: "exclamationmark.circle").font(.system(size: 48)).foregroundStyle(.orange)
+                    Text("A análise foi interrompida").font(.system(size: 26, weight: .semibold))
+                    Text(model.error ?? "Não foi possível concluir a análise.").foregroundStyle(AppStyle.muted)
+                    ActionButton(title: "Tentar novamente", icon: "arrow.clockwise") { model.scan() }
+                }.frame(maxWidth: .infinity, minHeight: 400)
             case .results:
                 if let snapshot = model.snapshot { results(snapshot) }
             }
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var welcome: some View {
-        VStack(spacing: 22) {
-            ZStack {
-                Circle().fill(AppStyle.aqua.opacity(0.18)).frame(width: 280, height: 280).blur(radius: 40)
-                CleanerArtwork().frame(width: 300, height: 300)
-                Image(systemName: "sparkle").font(.system(size: 34)).foregroundStyle(.white.opacity(0.9)).offset(x: 135, y: -90)
-                Image(systemName: "sparkle").font(.system(size: 18)).foregroundStyle(AppStyle.mint).offset(x: -140, y: 20)
-            }.accessibilityHidden(true)
-            Text("Seu Mac merece esse cuidado.")
-                .font(.system(size: 30, weight: .medium, design: .rounded)).tracking(-0.7)
-            Text("Encontre espaço para o que vem a seguir.")
-                .font(.system(size: 15)).foregroundStyle(AppStyle.muted)
-            ActionButton(title: "Analisar", icon: "sparkle.magnifyingglass") { model.scan() }
-                .accessibilityIdentifier("smartCare.scan").padding(.top, 6)
-            HStack(spacing: 28) {
-                Label("Limpeza", systemImage: "sparkles")
-                Label("Organização", systemImage: "square.stack.3d.up")
-                Label("Aplicativos", systemImage: "square.grid.2x2")
-            }.font(.system(size: 12)).foregroundStyle(AppStyle.muted).padding(.top, 10)
-        }.frame(maxWidth: .infinity).padding(.vertical, 16)
+        .onAppear { health.start() }
+        .onDisappear { health.stop() }
     }
 
     private func results(_ result: SmartCareSnapshot) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack {
-                Text("Análise concluída").font(.system(size: 20, weight: .semibold))
-                Spacer()
-                Button("Reanalisar") { model.scan() }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
-            }
-            if result.issues > 0 {
-                Text("\(result.issues) locais não puderam ser analisados completamente.")
-                    .foregroundStyle(.orange)
-            }
-            card("Limpeza", detail: "\(result.cleanupCount) itens · \(ByteText.format(result.cleanupBytes)) estimados",
-                 icon: "sparkles", action: openCleanup)
-            card("Limpeza adicional", detail: "\(result.advancedCount) itens · \(ByteText.format(result.advancedBytes)) estimados",
-                 icon: "square.grid.3x3", action: openAdvanced)
-            card("Acúmulos", detail: "\(result.duplicateGroups) grupos de duplicatas · até \(ByteText.format(result.duplicateSavings)) em cópias",
-                 icon: "square.on.square", action: openOrganization)
-            card("Arquivos grandes", detail: "\(result.largeFiles) arquivos com 100 MB ou mais",
-                 icon: "doc.zipper", action: openLargeFiles)
-            card("Aplicativos", detail: "\(result.appResidues) resíduos · \(result.oldInstallers) instaladores antigos",
-                 icon: "square.grid.2x2", action: openApplications)
-            card("Desempenho", detail: "Revise apps em execução e tarefas de manutenção",
-                 icon: "speedometer", action: openPerformance)
-            Text("Os valores são estimativas independentes e podem se sobrepor. Nenhum arquivo foi removido pela análise.")
-                .font(.system(size: 12)).foregroundStyle(AppStyle.muted)
-        }
-    }
-
-    private func card(_ title: String, detail: String, icon: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 14) {
-                Image(systemName: icon).font(.system(size: 23)).frame(width: 36)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .center) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text(title).font(.system(size: 17, weight: .semibold))
-                    Text(detail).font(.system(size: 12)).foregroundStyle(AppStyle.muted)
+                    Text("Análise concluída").font(.system(size: 28, weight: .semibold))
+                    Text("Veja o que merece sua atenção.").font(.system(size: 13)).foregroundStyle(AppStyle.muted)
                 }
                 Spacer()
-                Image(systemName: "chevron.right").foregroundStyle(AppStyle.mint)
+                Button("Analisar novamente") { model.scan() }.buttonStyle(.bordered)
+            }.padding(.bottom, 4)
+            if result.issues > 0 {
+                Label("\(count(result.issues, "aviso", "avisos")) de acesso ou cobertura · detalhes em cada área", systemImage: "info.circle")
+                    .font(.system(size: 11)).foregroundStyle(.orange)
             }
-            .padding(18).background(AppStyle.card, in: RoundedRectangle(cornerRadius: 16))
-        }
-        .buttonStyle(.plain)
+            LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+                resultCard("Limpeza", icon: "sparkles", color: .green,
+                           detail: "\(ByteText.format(result.cleanupBytes)) em \(count(result.cleanupCount, "item", "itens"))",
+                           action: openCleanup) {
+                    Button("Dados adicionais · \(ByteText.format(result.advancedBytes))") { openAdvanced() }
+                }
+                resultCard("Proteção", icon: "hand.raised.fill", color: .pink,
+                           detail: protectionDetail(result), action: openProtection) {
+                    Text("Auditoria local · cobertura limitada").foregroundStyle(AppStyle.muted)
+                }
+                resultCard("Desempenho", icon: "speedometer", color: .orange,
+                           detail: "\(ByteText.format(health.snapshot.memoryUsed)) de \(ByteText.format(health.snapshot.memoryTotal)) de memória em uso",
+                           action: openPerformance) {
+                    Text("Condição térmica: \(health.snapshot.thermalState)").foregroundStyle(AppStyle.muted)
+                }
+                resultCard("Aplicativos", icon: "square.grid.2x2.fill", color: .blue,
+                           detail: "\(count(result.applicationsResult.apps.count, "aplicativo", "aplicativos")) · \(count(result.appResidues, "possível resíduo", "possíveis resíduos"))",
+                           action: openApplications) {
+                    Text(count(result.oldInstallers, "instalador antigo", "instaladores antigos")).foregroundStyle(AppStyle.muted)
+                }
+                resultCard("Acúmulos", icon: "square.stack.3d.up.fill", color: .teal,
+                           detail: "\(count(result.duplicateGroups, "grupo de duplicatas", "grupos de duplicatas")) · até \(ByteText.format(result.duplicateSavings)) em cópias",
+                           action: openOrganization) {
+                    Button("Revisar \(count(result.largeFiles, "arquivo grande", "arquivos grandes"))") { openLargeFiles() }
+                }
+            }
+            Text("As estimativas de espaço podem se sobrepor. Revise os itens antes de confirmar a ação.")
+                .font(.system(size: 10)).foregroundStyle(AppStyle.muted)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
+
+    private func count(_ value: Int, _ singular: String, _ plural: String) -> String {
+        "\(value) \(value == 1 ? singular : plural)"
+    }
+
+    private func protectionDetail(_ result: SmartCareSnapshot) -> String {
+        guard let protection = result.protectionResult else {
+            return "Auditoria indisponível. Abra Proteção para tentar novamente."
+        }
+        let attention = (protection.findings + protection.security).filter(\.attention).count
+        return "\(count(attention, "observação", "observações")) · \(count(protection.scannedFiles, "arquivo verificado", "arquivos verificados"))"
+    }
+
+    private func resultCard<Detail: View>(_ title: String, icon: String, color: Color,
+                                         detail: String, action: @escaping () -> Void,
+                                         @ViewBuilder secondary: () -> Detail) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(spacing: 10) {
+                Image(systemName: icon).font(.system(size: 20, weight: .medium))
+                    .foregroundStyle(color).frame(width: 34, height: 34)
+                    .background(color.opacity(0.16), in: RoundedRectangle(cornerRadius: 10))
+                Text(title).font(.system(size: 17, weight: .semibold))
+                Spacer(minLength: 0)
+                Button("Revisar", action: action).buttonStyle(.bordered).controlSize(.small)
+            }
+            Text(detail).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 0)
+            secondary().font(.system(size: 11)).buttonStyle(.plain).foregroundStyle(color)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(16).frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .background(AppStyle.card, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).strokeBorder(color.opacity(0.13), lineWidth: 1))
+    }
+
 }
+
+#endif

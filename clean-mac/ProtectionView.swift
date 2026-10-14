@@ -44,7 +44,9 @@ final class ProtectionViewModel: ObservableObject {
                 if pendingAutomaticScan { scheduleAutomaticScan() }
             }
             do {
-                snapshot = try await engine.analyze(folder: folder)
+                let result = try await engine.analyze(folder: folder)
+                try Task.checkCancellation()
+                snapshot = result
                 lastAudit = Date()
                 if automatic { message = "Auditoria local atualizada após alterações na pasta monitorada. Revise os resultados; nenhuma limpeza foi executada." }
             }
@@ -145,27 +147,61 @@ final class ProtectionViewModel: ObservableObject {
 struct ProtectionView: View {
     @StateObject private var model = ProtectionViewModel.shared
     @State private var showingConfirmation = false
+    @State private var selectedSection = ProtectionSection.security
+    @State private var showingCoverage = false
+
+    private enum ProtectionSection: String, CaseIterable {
+        case security = "Segurança", privacy = "Privacidade", permissions = "Permissões", monitoring = "Monitoramento"
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            HStack {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Proteção e privacidade").font(.system(size: 36, weight: .semibold, design: .rounded))
-                    Text("Verificações locais de persistência, segurança e rastros de navegação.").foregroundStyle(AppStyle.muted)
+        Group {
+            if model.busy && model.snapshot == nil {
+                ScanOrbitView(title: "Verificando seu Mac", detail: "Conteúdo local, inicialização, privacidade e ajustes de segurança", progress: nil) { model.cancel() }
+            } else if let snapshot = model.snapshot {
+                results(snapshot)
+            } else {
+                VStack(spacing: 12) {
+                    ModuleLandingView(title: "Proteção", subtitle: "Revise a segurança e a privacidade do seu Mac. Verificação de conteúdo com ClamAV quando instalado; sem ele, somente teste EICAR.", symbol: "hand.raised.fill", accent: .pink,
+                                      features: [("shield.lefthalf.filled", "Verificação local"), ("hand.raised", "Privacidade"), ("lock.shield", "Permissões")]) { model.scan() }
+                    folderControls
+                    if model.monitoring { monitorCard }
+                    statusMessage
                 }
-                Spacer()
-                Image(systemName: "shield.lefthalf.filled").font(.system(size: 44)).foregroundStyle(AppStyle.mint)
             }
-            Text("Esta auditoria não certifica a ausência de malware. A verificação integrada de conteúdo reconhece somente o arquivo de teste EICAR; se houver ClamAV e assinaturas locais, também executa esse scanner sem baixar dados.")
-                .font(.system(size: 12)).foregroundStyle(AppStyle.muted)
-            HStack(spacing: 18) {
-                ActionButton(title: model.busy ? "Analisando…" : "Analisar este Mac", icon: "shield.checkered") { model.scan() }.disabled(model.busy)
-                Button("Escolher pasta…") { model.chooseFolder() }.disabled(model.busy)
-                if model.folder != nil { Button("Usar Downloads") { model.useDownloads() }.disabled(model.busy) }
-                if model.busy { ProgressView().controlSize(.small); Button("Cancelar") { model.cancel() } }
-            }
-            Text("Pasta de conteúdo: \(model.folder?.path ?? "Downloads") · até 3.000 itens, 8 MB por arquivo e 64 MB lidos; links simbólicos e pacotes ignorados.")
-                .font(.system(size: 11)).foregroundStyle(AppStyle.muted).textSelection(.enabled)
+        }
+        .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
+        .sheet(isPresented: $showingConfirmation) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Mover rastros para a Lixeira?").font(.system(size: 24, weight: .semibold))
+                Text("Feche totalmente os navegadores selecionados. Cookies removidos desconectam sites; o histórico removido deixa de aparecer no navegador. A Lixeira mantém os arquivos até você esvaziá-la.").foregroundStyle(AppStyle.muted)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(model.selectedTraces) { trace in Text(trace.url.path).font(.system(size: 11, design: .monospaced)).textSelection(.enabled) }
+                    }
+                }.frame(maxHeight: 230)
+                HStack { Spacer(); Button("Cancelar") { showingConfirmation = false }; Button("Confirmar e mover") { showingConfirmation = false; model.trash() } }
+            }.padding(26).frame(width: 620).background(AppStyle.background).preferredColorScheme(.dark)
+        }
+    }
+
+    private var folderControls: some View {
+        HStack(spacing: 14) {
+            Label(model.folder?.lastPathComponent ?? "Downloads", systemImage: "folder")
+                .foregroundStyle(AppStyle.muted)
+            Button("Escolher pasta…") { model.chooseFolder() }.disabled(model.busy)
+            if model.folder != nil { Button("Usar Downloads") { model.useDownloads() }.disabled(model.busy) }
+        }.font(.system(size: 12))
+    }
+
+    @ViewBuilder private var statusMessage: some View {
+        if let message = model.message {
+            Text(message).textSelection(.enabled).padding(14).frame(maxWidth: .infinity, alignment: .leading)
+                .background(AppStyle.card, in: RoundedRectangle(cornerRadius: 12))
+        }
+    }
+
+    private var monitorCard: some View {
             card("Monitoramento local", icon: "eye") {
                 Toggle("Monitorar alterações na pasta", isOn: Binding(get: { model.monitoring }, set: { enabled in
                     if enabled { model.startMonitoring() } else { model.stopMonitoring() }
@@ -179,8 +215,47 @@ struct ProtectionView: View {
                 }
                 if let date = model.lastAudit { Text("Última auditoria concluída: \(date.formatted(date: .abbreviated, time: .standard))").font(.system(size: 11)).foregroundStyle(AppStyle.muted) }
             }
-            if let message = model.message { Text(message).textSelection(.enabled).padding(14).frame(maxWidth: .infinity, alignment: .leading).background(AppStyle.card, in: RoundedRectangle(cornerRadius: 12)) }
-            if let snapshot = model.snapshot {
+    }
+
+    private func results(_ snapshot: ProtectionSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Proteção").font(.system(size: 32, weight: .semibold))
+                    Text("Verificação local concluída · \(snapshot.scannedFiles) arquivos inspecionados")
+                        .foregroundStyle(AppStyle.muted)
+                }
+                Spacer()
+                if model.busy { ProgressView().controlSize(.small) }
+                Button("Analisar novamente") { model.scan() }.buttonStyle(.bordered).disabled(model.busy)
+            }
+            folderControls
+            Picker("Área de proteção", selection: $selectedSection) {
+                ForEach(ProtectionSection.allCases, id: \.self) { section in Text(section.rawValue).tag(section) }
+            }.pickerStyle(.segmented)
+            statusMessage
+            switch selectedSection {
+            case .security:
+                securityCards(snapshot)
+            case .privacy:
+                privacyCard(snapshot)
+            case .permissions:
+                permissionsCard(snapshot)
+            case .monitoring:
+                monitorCard
+            }
+            DisclosureGroup("Cobertura da análise · \(snapshot.issues.count) avisos", isExpanded: $showingCoverage) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("A análise integrada reconhece o teste EICAR. ClamAV é executado somente quando instalado com assinaturas locais; não há download de dados. Os resultados não certificam ausência de malware.")
+                    Text("Pasta: \(snapshot.scanRoot.path) · até 3.000 itens, 8 MB por arquivo e 64 MB lidos. Links simbólicos e pacotes são ignorados.")
+                    ForEach(Array(snapshot.issues.enumerated()), id: \.offset) { _, issue in Text(issue) }
+                }.font(.system(size: 11)).foregroundStyle(AppStyle.muted).textSelection(.enabled).padding(.top, 8)
+            }.font(.system(size: 12)).foregroundStyle(AppStyle.muted)
+        }
+    }
+
+    private func securityCards(_ snapshot: ProtectionSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
                 card("Verificação de conteúdo", icon: "doc.text.magnifyingglass") {
                     Text("\(snapshot.scannedFiles) arquivo(s) inspecionado(s) em \(snapshot.scanRoot.path).")
                     Text(snapshot.scannerReport).font(.system(size: 12)).foregroundStyle(AppStyle.muted).textSelection(.enabled)
@@ -195,6 +270,10 @@ struct ProtectionView: View {
                     ForEach(snapshot.findings.filter { $0.title != "Arquivo de teste EICAR" }) { finding in findingRow(finding) }
                     Button("Gerenciar Itens de Início") { openSettings("x-apple.systempreferences:com.apple.LoginItems-Settings.extension") }
                 }
+        }
+    }
+
+    private func privacyCard(_ snapshot: ProtectionSnapshot) -> some View {
                 card("Rastros dos navegadores", icon: "hand.raised") {
                     Text("Revise os arquivos exatos abaixo. Selecione um navegador para incluir seus bancos e arquivos auxiliares juntos. Feche o navegador completamente antes de mover; cookies removidos encerram sessões em sites. Histórico e cookies podem voltar se a sincronização do navegador estiver ativa.")
                         .font(.system(size: 12)).foregroundStyle(AppStyle.muted)
@@ -218,34 +297,15 @@ struct ProtectionView: View {
                     }
                     Button("Revisar e mover para a Lixeira") { showingConfirmation = true }.disabled(model.selectedTraces.isEmpty || model.busy)
                 }
+    }
+
+    private func permissionsCard(_ snapshot: ProtectionSnapshot) -> some View {
                 card("Permissões e segurança do macOS", icon: "lock.shield") {
                     ForEach(snapshot.security) { finding in findingRow(finding) }
                     ForEach(snapshot.permissions) { finding in findingRow(finding) }
                     Button("Abrir Privacidade e Segurança") { openSettings("x-apple.systempreferences:com.apple.preference.security?Privacy") }
                     Button("Abrir Firewall") { openSettings("x-apple.systempreferences:com.apple.Network-Settings.extension?Firewall") }
                 }
-                if !snapshot.issues.isEmpty {
-                    card("Cobertura e itens não verificados", icon: "info.circle") {
-                        ForEach(Array(snapshot.issues.enumerated()), id: \.offset) { _, issue in
-                            Text(issue).font(.system(size: 11)).foregroundStyle(AppStyle.muted).textSelection(.enabled)
-                        }
-                    }
-                }
-            }
-        }
-        .font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
-        .sheet(isPresented: $showingConfirmation) {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("Mover rastros para a Lixeira?").font(.system(size: 24, weight: .semibold))
-                Text("Feche totalmente os navegadores selecionados. Cookies removidos desconectam sites; o histórico removido deixa de aparecer no navegador. A Lixeira mantém os arquivos até você esvaziá-la.").foregroundStyle(AppStyle.muted)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(model.selectedTraces) { trace in Text(trace.url.path).font(.system(size: 11, design: .monospaced)).textSelection(.enabled) }
-                    }
-                }.frame(maxHeight: 230)
-                HStack { Spacer(); Button("Cancelar") { showingConfirmation = false }; Button("Confirmar e mover") { showingConfirmation = false; model.trash() } }
-            }.padding(26).frame(width: 620).background(AppStyle.background).preferredColorScheme(.dark)
-        }
     }
 
     private func findingRow(_ finding: ProtectionFinding) -> some View {

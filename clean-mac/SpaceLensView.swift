@@ -50,6 +50,11 @@ final class SpaceLensViewModel: ObservableObject {
             }
         }
     }
+    func cancel() {
+        scanTask?.cancel()
+        scanID = UUID()
+        state = .idle
+    }
     func remove(_ item: SpaceLensItem) {
         guard !isRemoving else { return }
         isRemoving = true; removalMessage = nil
@@ -70,25 +75,55 @@ struct SpaceLensView: View {
     @State private var reviewing = false
     @State private var search = ""
 
+    @State private var showMap = true
+    private let accent = Color(red: 0.73, green: 0.51, blue: 0.95)
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            Text("Lupa de Espaço").font(.system(size: 40, weight: .semibold, design: .rounded))
-            Text("A área de cada bloco corresponde ao tamanho dos arquivos. Clique numa pasta para explorar seu conteúdo.").foregroundStyle(AppStyle.muted)
-            HStack {
-                Button("Escolher pasta…") { path = []; model.chooseFolder() }
-                if model.selectedRoot != nil { Button("Pastas pessoais") { path = []; model.usePersonalFolders() } }
-                if let root = model.selectedRoot { Text(root.path).lineLimit(1).truncationMode(.middle).foregroundStyle(AppStyle.muted) }
-            }
-            if let message = model.removalMessage { Text(message).foregroundStyle(AppStyle.mint) }
+        Group {
             switch model.state {
-            case .idle: ActionButton(title: "Visualizar espaço", icon: "square.3.layers.3d") { model.scan() }
-            case .scanning: ProgressView("Calculando o tamanho das pastas…").tint(AppStyle.mint)
+            case .idle:
+                VStack(spacing: 8) {
+                    ModuleLandingView(title: "Lupa de Espaço",
+                        subtitle: "Veja o que ocupa espaço no Mac. Explore suas pastas, encontre arquivos grandes e abra espaço para coisas novas.",
+                        symbol: "magnifyingglass", accent: accent,
+                        features: [("square.grid.2x2.fill", "Mapa visual"), ("folder.fill", "Pastas grandes"), ("doc.fill", "Arquivos locais")],
+                        action: { path = []; model.scan() })
+                    Button("Escolher outra pasta…") { path = []; model.chooseFolder() }
+                        .buttonStyle(.plain).foregroundStyle(accent)
+                    if let root = model.selectedRoot {
+                        Text(root.path).font(.caption).foregroundStyle(AppStyle.muted)
+                        Button("Analisar pastas pessoais") { path = []; model.usePersonalFolders() }
+                    }
+                }
+            case .scanning:
+                ScanOrbitView(title: "Mapeando seu espaço", detail: model.selectedRoot?.path ?? "Calculando o tamanho das pastas pessoais…", progress: nil, cancel: model.cancel)
             case .failed:
-                Text(model.error ?? "A análise falhou.").foregroundStyle(.orange)
-                Button("Tentar novamente") { model.scan() }
-            case .results: if let snapshot = model.snapshot { results(snapshot) }
+                ContentUnavailableView {
+                    Label("Não foi possível mapear esta pasta", systemImage: "exclamationmark.triangle")
+                } description: {
+                    Text(model.error ?? "A análise falhou.")
+                } actions: {
+                    Button("Tentar novamente") { model.scan() }
+                    Button("Escolher pasta…") { path = []; model.chooseFolder() }
+                    Button("Voltar", action: model.cancel)
+                }.frame(minHeight: 500)
+            case .results:
+                VStack(alignment: .leading, spacing: 22) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Lupa de Espaço").font(.system(size: 32, weight: .bold))
+                            Text("Explore o que ocupa espaço no seu Mac.").foregroundStyle(AppStyle.muted)
+                        }
+                        Spacer()
+                        Button("Escolher pasta…") { path = []; model.chooseFolder() }
+                        if model.selectedRoot != nil { Button("Pastas pessoais") { path = []; model.usePersonalFolders() } }
+                    }
+                    if let message = model.removalMessage { Text(message).foregroundStyle(accent) }
+                    if let snapshot = model.snapshot { results(snapshot) }
+                }
             }
         }.font(.system(size: 13)).frame(maxWidth: .infinity, alignment: .leading)
+            .tint(accent)
             .disabled(model.isRemoving)
             .sheet(isPresented: $reviewing) {
                 if let item = pendingRemoval, let identity = item.identity {
@@ -109,29 +144,42 @@ struct SpaceLensView: View {
             HStack {
                 Text("\(ByteText.format(total)) · \(snapshot.scannedFiles) arquivos analisados").font(.system(size: 17, weight: .semibold))
                 Spacer()
-                Button("Analisar novamente") { path = []; model.scan() }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
+                Button("Analisar novamente") { path = []; model.scan() }.buttonStyle(.plain).foregroundStyle(accent)
             }
             if snapshot.truncated { Text("A análise atingiu 200.000 entradas. Os tamanhos exibidos estão incompletos.").foregroundStyle(.orange) }
             if snapshot.inaccessibleLocations > 0 { Text("\(snapshot.inaccessibleLocations) locais não puderam ser lidos.").foregroundStyle(.orange) }
             Text("Tamanhos lógicos; clones APFS podem compartilhar espaço. Itens ocultos, links, pacotes, nuvem e outros volumes ficam fora. Pastas vazias não ocupam área no mapa.")
                 .font(.system(size: 12)).foregroundStyle(AppStyle.muted)
-            HStack(spacing: 8) {
-                Button("Início") { path = [] }.buttonStyle(.plain)
-                ForEach(Array(path.enumerated()), id: \.offset) { index, name in
-                    Image(systemName: "chevron.right").font(.system(size: 10))
-                    Button(name) { path = Array(path.prefix(index + 1)) }.buttonStyle(.plain)
+            HStack {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        Button { path = []; search = "" } label: { Image(systemName: "house.fill") }.buttonStyle(.plain).help("Início")
+                        ForEach(Array(path.enumerated()), id: \.offset) { index, name in
+                            Image(systemName: "chevron.right").font(.system(size: 9))
+                            Button(name) { path = Array(path.prefix(index + 1)); search = "" }.buttonStyle(.plain).lineLimit(1)
+                        }
+                    }.foregroundStyle(accent).font(.system(size: 12, weight: .semibold))
                 }
-            }.foregroundStyle(AppStyle.mint).font(.system(size: 13, weight: .semibold))
-            SpaceTreemap(items: items) { item in
-                if item.isDirectory { path.append(item.name); search = "" }
-                else { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
-            }.frame(height: 330)
+                if !path.isEmpty {
+                    Button { path.removeLast(); search = "" } label: { Image(systemName: "arrow.up") }.help("Pasta anterior")
+                }
+                Picker("Visualização", selection: $showMap) {
+                    Text("Mapa").tag(true)
+                    Text("Lista").tag(false)
+                }.pickerStyle(.segmented).frame(width: 145)
+            }
+            if showMap {
+                SpaceTreemap(items: items) { item in
+                    if item.isDirectory { path.append(item.name); search = "" }
+                    else { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }
+                }.frame(height: 330)
+            }
             TextField("Filtrar itens desta pasta", text: $search).textFieldStyle(.roundedBorder)
             if filtered.isEmpty { Text("Nenhum item corresponde ao filtro.").foregroundStyle(AppStyle.muted) }
             LazyVStack(spacing: 8) {
                 ForEach(filtered) { item in
                     HStack(spacing: 12) {
-                        Image(systemName: item.isDirectory ? "folder.fill" : "doc.fill").foregroundStyle(AppStyle.mint).frame(width: 24)
+                        Image(systemName: item.isDirectory ? "folder.fill" : "doc.fill").foregroundStyle(accent).frame(width: 24)
                         VStack(alignment: .leading, spacing: 4) {
                             Text(item.name).fontWeight(.semibold).lineLimit(1)
                             Text(item.isDirectory ? "\(item.fileCount) arquivos" : item.url.path).font(.system(size: 11)).foregroundStyle(AppStyle.muted).lineLimit(1)
@@ -139,9 +187,9 @@ struct SpaceLensView: View {
                         Spacer()
                         Text(ByteText.format(item.logicalBytes)).font(.system(size: 12, design: .monospaced))
                         if item.isDirectory {
-                            Button("Abrir") { path.append(item.name); search = "" }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
+                            Button("Abrir") { path.append(item.name); search = "" }.buttonStyle(.plain).foregroundStyle(accent)
                         } else {
-                            Button("Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }.buttonStyle(.plain).foregroundStyle(AppStyle.mint)
+                            Button("Finder") { NSWorkspace.shared.activateFileViewerSelecting([item.url]) }.buttonStyle(.plain).foregroundStyle(accent)
                             Button { pendingRemoval = item; reviewing = true } label: { Image(systemName: "trash") }
                                 .buttonStyle(.plain).accessibilityLabel("Mover \(item.name) para a Lixeira")
                         }
