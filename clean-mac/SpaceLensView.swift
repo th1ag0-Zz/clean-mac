@@ -8,6 +8,7 @@ final class SpaceLensViewModel: ObservableObject {
     @Published private(set) var state: State = .idle
     @Published private(set) var snapshot: SpaceLensSnapshot?
     @Published private(set) var error: String?
+    @Published private(set) var locationRejected = false
     @Published private(set) var removalMessage: String?
     @Published private(set) var isRemoving = false
     @Published private(set) var selectedRoot: URL?
@@ -36,7 +37,7 @@ final class SpaceLensViewModel: ObservableObject {
         scanTask?.cancel(); scanID = UUID()
         let currentID = scanID
         let root = selectedRoot
-        state = .scanning; snapshot = nil; error = nil
+        state = .scanning; snapshot = nil; error = nil; locationRejected = false
         scanTask = Task {
             do {
                 let result = try await engine.scan(root: root)
@@ -46,7 +47,14 @@ final class SpaceLensViewModel: ObservableObject {
             } catch is CancellationError {
                 guard scanID == currentID else { return }; state = .idle
             } catch {
-                guard scanID == currentID else { return }; self.error = error.localizedDescription; state = .failed
+                guard scanID == currentID else { return }
+                if let fileError = error as? PersonalFileError, case .unsafeLocation = fileError {
+                    locationRejected = true
+                    self.error = "O Clean Mac não mapeia esta pasta. Links, pacotes, arquivos de nuvem e pastas do sistema ficam fora da Lupa de Espaço. Acesso Total ao Disco não altera esse limite."
+                } else {
+                    self.error = error.localizedDescription
+                }
+                state = .failed
             }
         }
     }
@@ -102,9 +110,11 @@ struct SpaceLensView: View {
                     Label("Não foi possível mapear esta pasta", systemImage: "exclamationmark.triangle")
                 } description: {
                     Text(model.error ?? "A análise falhou.")
+                    if let root = model.selectedRoot { Text(root.path).font(.caption) }
                 } actions: {
-                    Button("Tentar novamente") { model.scan() }
+                    if !model.locationRejected { Button("Tentar novamente") { model.scan() } }
                     Button("Escolher pasta…") { path = []; model.chooseFolder() }
+                    if model.selectedRoot != nil { Button("Analisar pastas pessoais") { path = []; model.usePersonalFolders() } }
                     Button("Voltar", action: model.cancel)
                 }.frame(minHeight: 500)
             case .results:

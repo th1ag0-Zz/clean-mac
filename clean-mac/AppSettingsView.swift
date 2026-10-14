@@ -19,7 +19,7 @@ struct AppSettingsView: View {
             Toggle("Mostrar saúde do Mac na barra de menus", isOn: $showMenuBar)
             Divider()
             Label("Acesso aos arquivos", systemImage: "folder.badge.gearshape").font(.headline)
-            Text("Autorize Clean Mac em Acesso Total ao Disco para analisar caches protegidos, dados do Mail, lixeiras e permissões de aplicativos. O macOS pode exigir que você reabra o app.")
+            Text("Para reduzir pedidos de acesso a pastas, adicione o Clean Mac instalado em Aplicativos a Acesso Total ao Disco e ative a chave. Depois, encerre e abra o app novamente. Só você pode conceder esse acesso nos Ajustes do Sistema; ele não altera as pastas que a Lupa de Espaço exclui por segurança.")
                 .foregroundStyle(AppStyle.muted)
             Button("Abrir Acesso Total ao Disco") {
                 NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
